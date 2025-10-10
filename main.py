@@ -1,3 +1,5 @@
+
+
 # Description: Automatically collects and stores images from DuckDuckGo search
 
 import os
@@ -11,6 +13,7 @@ from duckduckgo_search import DDGS
 
 # configuration
 # list of search phrases
+
 SEARCH_PHRASES = [
     "happy face person",
     "sad face person",
