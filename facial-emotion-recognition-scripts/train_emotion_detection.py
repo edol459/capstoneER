@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
+
 """
-Emotion Detection using FER-2013 Dataset
-Modified to exclude 'disgust' emotion and balance dataset (6 classes total)
-Name: Ethan Dolder
-Student ID: 00324556678
+Emotion Detection Model Architecture & Training using FER-2013 Dataset
+
 """
 
 import os
@@ -36,13 +35,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else
 
 # Global configuration
 IMG_SIZE = 48  # FER-2013 uses 48x48 grayscale images
-EXCLUDE_EMOTIONS = ['disgust']  # Exclude disgust due to low sample count
-MAX_SAMPLES_PER_CLASS = None  # Limit samples per emotion to speed up training
+EXCLUDE_EMOTIONS = ['disgust']  # Exclude disgust
+MAX_SAMPLES_PER_CLASS = None  # Limit samples per emotion if desired
 
 
-# ============================================================================
 # PART A: DATA & SETUP
-# ============================================================================
 
 class AddGaussianNoise:
     """Add Gaussian noise to image tensor for data augmentation"""
@@ -65,13 +62,13 @@ class EmotionDataset(Dataset):
         self.exclude_classes = exclude_classes or []
         self.max_samples_per_class = max_samples_per_class
         
-        # Get emotion classes (subdirectories), excluding specified classes
+        # Get emotion classes  excluding specified classes
         self.classes = sorted([d for d in os.listdir(root_dir) 
                               if os.path.isdir(os.path.join(root_dir, d))
                               and d not in self.exclude_classes])
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
         
-        # Build list of (image_path, label) tuples
+        # Load all image file paths and labels
         self.samples = []
         for emotion in self.classes:
             emotion_dir = os.path.join(root_dir, emotion)
@@ -201,13 +198,13 @@ def get_dataloaders(data_dir="prepared_data", batch_size=64, exclude_classes=Non
     return train_loader, val_loader, test_loader, train_dataset.classes
 
 
-# ============================================================================
-# PART B: MODEL ARCHITECTURE (SIMPLER VERSION)
-# ============================================================================
+# MODEL ARCHITECTURES 
+
+# Initial Simple CNN
 
 class SimpleCNN(nn.Module):
     """
-    Simple CNN for emotion detection - similar to FashionMNIST architecture
+    Initial simple CNN for emotion detection, not using currently
     """
     def __init__(self, num_classes=6, depth=2, base_channels=16, dropout=0.25):
         super(SimpleCNN, self).__init__()
@@ -252,9 +249,32 @@ class SimpleCNN(nn.Module):
         return x
 
 
-# ============================================================================
+#RESNET ARCHITECTURE- currently using
+def make_resnet(num_classes=6, pretrained=True, freeze_backbone=True):
+    """
+    Create a ResNet18 model adapted for grayscale FER images.
+    Args:
+        num_classes: number of emotion classes
+        pretrained: use pretrained ImageNet weights
+        freeze_backbone: whether to freeze earlier layers for feature extraction
+    """
+    model = resnet18(weights='IMAGENET1K_V1' if pretrained else None)
+    
+    # Modify first conv layer to accept 1-channel input
+    model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    
+    # Replace final  layer
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    
+    # freeze all backbone layers except the classifier
+    if freeze_backbone:
+        for name, param in model.named_parameters():
+            if not name.startswith("fc"):
+                param.requires_grad = False
+                
+    return model
+
 # PART C: TRAINING & EVALUATION FUNCTIONS
-# ============================================================================
 
 def train_one_epoch(model, loader, criterion, optimizer):
     """Train model for one epoch"""
@@ -333,41 +353,14 @@ def fit(model, train_loader, val_loader, optimizer, epochs=15, criterion=None):
     return model, history
 
 
-# ============================================================================
-# PART D: EXPERIMENT RUNNER
-# ============================================================================
 
-def make_resnet(num_classes=6, pretrained=True, freeze_backbone=True):
-    """
-    Create a ResNet18 model adapted for grayscale FER images.
-    Args:
-        num_classes: number of emotion classes
-        pretrained: use pretrained ImageNet weights
-        freeze_backbone: whether to freeze earlier layers for feature extraction
-    """
-    model = resnet18(weights='IMAGENET1K_V1' if pretrained else None)
-    
-    # Modify first conv layer to accept 1-channel input
-    model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-    
-    # Replace final classification layer
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    
-    # Optionally freeze all backbone layers except the classifier
-    if freeze_backbone:
-        for name, param in model.named_parameters():
-            if not name.startswith("fc"):
-                param.requires_grad = False
-                
-    return model
+# EXPERIMENT RUNNER
 
 def run_experiment(config, train_loader, val_loader, num_classes, epochs=20):
     """Run a single experiment with given configuration"""
     model_type = config.get('model_type', 'simplecnn')
 
-    # ------------------------------------------------------------------
-    # ✅ 1. Model setup
-    # ------------------------------------------------------------------
+    # 1. Model setup
     if model_type == 'resnet18':
         model = make_resnet(
             num_classes=num_classes,
@@ -382,9 +375,7 @@ def run_experiment(config, train_loader, val_loader, num_classes, epochs=20):
             dropout=config.get('dropout', 0.25)
         ).to(DEVICE)
 
-    # ------------------------------------------------------------------
-    # ✅ 2. Compute class weights for balanced loss
-    # ------------------------------------------------------------------
+    #  Compute class weights for balanced loss
     from sklearn.utils.class_weight import compute_class_weight
 
     # Extract labels from training dataset
@@ -399,14 +390,12 @@ def run_experiment(config, train_loader, val_loader, num_classes, epochs=20):
 
     # Convert to tensor and send to GPU/CPU
     weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
-    print(f"⚖️  Using class-weighted loss: {weights.cpu().numpy().round(2)}")
+    print(f"Using class-weighted loss: {weights.cpu().numpy().round(2)}")
 
     # Weighted CrossEntropyLoss
     criterion = nn.CrossEntropyLoss(weight=weights)
 
-    # ------------------------------------------------------------------
-    # ✅ 3. Optimizer
-    # ------------------------------------------------------------------
+    # Optimizer
     optimizer_name = config.get('optimizer', 'Adam')
     lr = config.get('lr', 0.0001)
     if optimizer_name == 'Adam':
@@ -418,17 +407,13 @@ def run_experiment(config, train_loader, val_loader, num_classes, epochs=20):
     else:
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
 
-    # ------------------------------------------------------------------
-    # ✅ 4. Train model
-    # ------------------------------------------------------------------
+    # Train model
     model, history = fit(model, train_loader, val_loader, optimizer, epochs, criterion)
     val_loss, val_acc, y_true, y_pred = evaluate(model, val_loader, criterion)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    # ------------------------------------------------------------------
-    # ✅ 5. Return results summary
-    # ------------------------------------------------------------------
+    # Return results summary
     return {
         'config': config,
         'val_loss': float(val_loss),
@@ -440,11 +425,7 @@ def run_experiment(config, train_loader, val_loader, num_classes, epochs=20):
         'y_pred': y_pred,
     }
 
-
-
-# ============================================================================
-# PART E: EVALUATION & VISUALIZATION
-# ============================================================================
+# EVALUATION & VISUALIZATION
 
 def summarize_results(results):
     """Create summary table of all experiments"""
@@ -545,12 +526,11 @@ def plot_training_history(history, title="Training History"):
 # ============================================================================
 
 def main():
-    print(f"\n{'='*70}")
-    print("EMOTION DETECTION - FER-2013 DATASET (BALANCED)")
+    print("EMOTION DETECTION - FER-2013 DATASET")
     print(f"{'='*70}")
-    print(f"🚀 Using device: {DEVICE}")
-    print(f"📊 Image size: {IMG_SIZE}x{IMG_SIZE} grayscale")
-    print(f"🚫 Excluding emotions: {EXCLUDE_EMOTIONS}")
+    print(f"Using device: {DEVICE}")
+    print(f"Image size: {IMG_SIZE}x{IMG_SIZE} grayscale")
+    print(f"Excluding emotions: {EXCLUDE_EMOTIONS}")
     
     # Load data with balanced sampling
     train_loader, val_loader, test_loader, class_names = get_dataloaders(
@@ -611,11 +591,11 @@ def main():
     
     # Test evaluation
     print(f"\n{'='*80}")
-    print("📝 FINAL TEST EVALUATION")
+    print("FINAL TEST EVALUATION")
     print(f"{'='*80}")
     test_acc, y_true, y_pred = evaluate_on_test(best_model, test_loader)
-    print(f"\n✅ Test Accuracy (best model): {test_acc:.4f}")
-    print("\n📋 Classification Report (Test):")
+    print(f"\nTest Accuracy (best model): {test_acc:.4f}")
+    print("\nClassification Report (Test):")
     print(classification_report(y_true, y_pred, target_names=class_names, zero_division=0))
     
     # Confusion matrix
@@ -631,11 +611,11 @@ def main():
         'class_names': class_names,
         'test_acc': test_acc
     }, model_path)
-    print(f"\n💾 Best model saved to: {model_path}")
+    print(f"\nBest model saved to: {model_path}")
     
     print("\n" + "="*80)
-    print("✅ ALL EXPERIMENTS COMPLETED!")
-    print("📁 Files saved: emotion_confusion_matrix.png, emotion_training_history.png")
+    print("ALL EXPERIMENTS COMPLETED!")
+    print("Files saved: emotion_confusion_matrix.png, emotion_training_history.png")
     print("="*80)
 
 
