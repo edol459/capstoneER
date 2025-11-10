@@ -357,7 +357,7 @@ def fit(model, train_loader, val_loader, optimizer, epochs=15, criterion=None):
 # EXPERIMENT RUNNER
 
 def run_experiment(config, train_loader, val_loader, num_classes, epochs=20):
-    """Run a single experiment with given configuration"""
+    """Run experiment with given configuration"""
     model_type = config.get('model_type', 'simplecnn')
 
     # 1. Model setup
@@ -454,11 +454,16 @@ def summarize_results(results):
     return df
 
 
-def evaluate_on_test(model, test_loader):
-    """Evaluate best model on test set"""
+from sklearn.metrics import (
+    accuracy_score, precision_recall_fscore_support, 
+    cohen_kappa_score, roc_auc_score
+)
+
+def evaluate_on_test(model, test_loader, num_classes):
+    """Evaluate best model on test set with extended metrics"""
     model.eval()
     all_preds, all_targets = [], []
-    
+
     with torch.no_grad():
         for xb, yb in test_loader:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -466,12 +471,31 @@ def evaluate_on_test(model, test_loader):
             preds = logits.argmax(dim=1)
             all_preds.append(preds.cpu().numpy())
             all_targets.append(yb.cpu().numpy())
-    
+
     y_pred = np.concatenate(all_preds)
     y_true = np.concatenate(all_targets)
+
     acc = accuracy_score(y_true, y_pred)
-    
-    return acc, y_true, y_pred
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average='weighted', zero_division=0
+    )
+    kappa = cohen_kappa_score(y_true, y_pred)
+
+    # Multi-class ROC macro score
+    try:
+        y_probs = []
+        with torch.no_grad():
+            for xb, _ in test_loader:
+                xb = xb.to(DEVICE)
+                logits = model(xb)
+                probs = torch.softmax(logits, dim=1)
+                y_probs.append(probs.cpu().numpy())
+        y_probs = np.concatenate(y_probs)
+        auc = roc_auc_score(y_true, y_probs, multi_class='ovr')
+    except:
+        auc = None
+
+    return acc, precision, recall, f1, kappa, auc, y_true, y_pred
 
 
 def plot_confusion(cm, class_names, title="Confusion Matrix"):
@@ -520,6 +544,35 @@ def plot_training_history(history, title="Training History"):
     plt.show()
     print("✅ Training history saved as 'emotion_training_history.png'")
 
+def compare_histories(results):
+    """Side-by-side plot comparing model validation performance"""
+    plt.figure(figsize=(14,6))
+
+    # Accuracy
+    plt.subplot(1,2,1)
+    for r in results:
+        plt.plot(r['history']['val_acc'], label=r['config']['name'])
+    plt.title("Validation Accuracy Comparison")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # Loss
+    plt.subplot(1,2,2)
+    for r in results:
+        plt.plot(r['history']['val_loss'], label=r['config']['name'])
+    plt.title("Validation Loss Comparison")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("model_comparison.png", dpi=300)
+    plt.show()
+    print("✅ Saved: model_comparison.png")
+
 
 # ============================================================================
 # MAIN FUNCTION
@@ -532,7 +585,7 @@ def main():
     print(f"Image size: {IMG_SIZE}x{IMG_SIZE} grayscale")
     print(f"Excluding emotions: {EXCLUDE_EMOTIONS}")
     
-    # Load data with balanced sampling
+    # Load data
     train_loader, val_loader, test_loader, class_names = get_dataloaders(
         data_dir="prepared_data",
         batch_size=64,
@@ -542,29 +595,21 @@ def main():
     
     num_classes = len(class_names)
     
-    # Define experiments - simpler, faster configurations
+    # SimpleCNN baseline and ResNet18
     experiments = [
-        # Baseline SimpleCNN experiments
-        #{'name': 'Baseline-D2-16ch-Adam-0.001', 'model_type': 'simplecnn', 'depth': 2, 'base_channels': 16,
-        #'dropout': 0.25, 'optimizer': 'Adam', 'lr': 0.001},
-        
-        #{'name': 'Deep-D3-16ch-SGD-0.01', 'model_type': 'simplecnn', 'depth': 3, 'base_channels': 16,
-        #'dropout': 0.25, 'optimizer': 'SGD', 'lr': 0.01},
-        
-        #{'name': 'Wide-D2-32ch-Adam-0.005', 'model_type': 'simplecnn', 'depth': 2, 'base_channels': 32,
-        #'dropout': 0.3, 'optimizer': 'Adam', 'lr': 0.005},
+        {'name': 'Baseline-D2-16ch-Adam-0.001', 'model_type': 'simplecnn', 'depth': 2, 'base_channels': 16,
+         'dropout': 0.25, 'optimizer': 'Adam', 'lr': 0.001},
 
-        # Try ResNet18
         {'name': 'ResNet18-FullFinetune-Adam-0.0001', 
-        'model_type': 'resnet18',
-        'optimizer': 'Adam',
-        'lr': 0.0001,
-        'freeze_backbone': False}
+         'model_type': 'resnet18',
+         'optimizer': 'Adam',
+         'lr': 0.0001,
+         'freeze_backbone': False}
     ]
 
-    
     results = []
     
+    # Run experiments
     for cfg in experiments:
         print(f"\n{'='*80}")
         print(f"🔬 Running experiment: {cfg.get('name', 'exp')}")
@@ -572,10 +617,10 @@ def main():
         r = run_experiment(cfg, train_loader, val_loader, num_classes, epochs=20)
         results.append(r)
     
-    # Summary table
+    # Show summary table
     df = summarize_results(results)
     
-    # Choose best model by validation accuracy
+    # Pick best model (highest val accuracy)
     best_idx = int(np.argmax([r['val_acc'] for r in results]))
     best_model = results[best_idx]['model']
     best_config = results[best_idx]['config']
@@ -583,25 +628,38 @@ def main():
     print(f"\n🏆 Best Model: {best_config.get('name', 'Unknown')}")
     print(f"📊 Best Validation Accuracy: {results[best_idx]['val_acc']:.4f}")
     
-    # Plot training history for best model
+    # Plot best model learning curves
     plot_training_history(
         results[best_idx]['history'],
         title=f"Training History - {best_config.get('name', 'Best Model')}"
     )
+
+    # 📊 New: Compare all experiments visually
+    compare_histories(results)
     
-    # Test evaluation
+    # ===========================
+    # ✅ FINAL TEST EVALUATION
+    # ===========================
     print(f"\n{'='*80}")
     print("FINAL TEST EVALUATION")
     print(f"{'='*80}")
-    test_acc, y_true, y_pred = evaluate_on_test(best_model, test_loader)
-    print(f"\nTest Accuracy (best model): {test_acc:.4f}")
-    print("\nClassification Report (Test):")
+
+    acc, precision, recall, f1, kappa, auc, y_true, y_pred = evaluate_on_test(best_model, test_loader, num_classes)
+
+    print(f"\nTest Accuracy: {acc:.4f}")
+    print(f"Precision (weighted): {precision:.4f}")
+    print(f"Recall (weighted): {recall:.4f}")
+    print(f"F1 Score (weighted): {f1:.4f}")
+    print(f"Cohen's Kappa: {kappa:.4f}")
+    if auc is not None:
+        print(f"ROC-AUC (macro): {auc:.4f}")
+
+    print("\nClassification Report:")
     print(classification_report(y_true, y_pred, target_names=class_names, zero_division=0))
-    
-    # Confusion matrix
+
     cm = confusion_matrix(y_true, y_pred, labels=np.arange(num_classes))
     plot_confusion(cm, class_names, title="FER-2013 Emotion Detection - Confusion Matrix (Test)")
-    
+
     # Save best model
     os.makedirs('models', exist_ok=True)
     model_path = 'models/best_emotion_model.pth'
@@ -609,13 +667,21 @@ def main():
         'model_state_dict': best_model.state_dict(),
         'config': best_config,
         'class_names': class_names,
-        'test_acc': test_acc
+        'test_acc': acc,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'kappa': kappa,
+        'auc': auc
     }, model_path)
-    print(f"\nBest model saved to: {model_path}")
+    print(f"\n✅ Best model saved to: {model_path}")
     
     print("\n" + "="*80)
     print("ALL EXPERIMENTS COMPLETED!")
-    print("Files saved: emotion_confusion_matrix.png, emotion_training_history.png")
+    print("Saved:")
+    print(" - emotion_confusion_matrix.png")
+    print(" - emotion_training_history.png")
+    print(" - model_comparison.png")
     print("="*80)
 
 
