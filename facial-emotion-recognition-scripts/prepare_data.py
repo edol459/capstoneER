@@ -102,7 +102,90 @@ for emotion in emotion_classes:
     
     split_stats[emotion]["test"] = len(image_files)
 
+
+# ======================================================================
+# OVERSAMPLING MINORITY CLASSES (Option A)
+# ======================================================================
+
+import random
+from PIL import Image, ImageEnhance, ImageFilter
+
+TARGET_MIN_SAMPLES = 4000  # Target size per class in training set
+
+def load_image(path):
+    try:
+        return Image.open(path).convert('L')
+    except:
+        return None
+
+def augment_image(img):
+    """Apply a random augmentation & return the augmented image."""
+    aug = img.copy()
+
+    # Random horizontal flip
+    if random.random() < 0.5:
+        aug = aug.transpose(Image.FLIP_LEFT_RIGHT)
+
+    # Random rotation
+    angle = random.uniform(-15, 15)
+    aug = aug.rotate(angle)
+
+    # Brightness
+    if random.random() < 0.5:
+        aug = ImageEnhance.Brightness(aug).enhance(random.uniform(0.7, 1.3))
+
+    # Contrast
+    if random.random() < 0.5:
+        aug = ImageEnhance.Contrast(aug).enhance(random.uniform(0.7, 1.4))
+
+    # Gaussian blur
+    if random.random() < 0.3:
+        aug = aug.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.0, 1.5)))
+
+    return aug
+
+
+print("\n" + "="*70)
+print("OVERSAMPLING MINORITY CLASSES")
+print("="*70)
+
+train_dir = os.path.join(OUTPUT_DIR, "train")
+
+for emotion in emotion_classes:
+    emotion_path = os.path.join(train_dir, emotion)
+    images = [f for f in os.listdir(emotion_path) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+
+    current_count = len(images)
+    print(f"\nClass '{emotion}' has {current_count} samples")
+
+    if current_count >= TARGET_MIN_SAMPLES:
+        print("  ✔ Already above target — skipping")
+        continue
+
+    needed = TARGET_MIN_SAMPLES - current_count
+    print(f"  → Oversampling needed: {needed} images")
+
+    for i in range(needed):
+        src_file = random.choice(images)
+        src_path = os.path.join(emotion_path, src_file)
+
+        img = load_image(src_path)
+        if img is None:
+            continue
+
+        aug_img = augment_image(img)
+        new_filename = f"aug_{i:06d}.jpg"
+        aug_path = os.path.join(emotion_path, new_filename)
+        aug_img.save(aug_path)
+
+    new_total = len(os.listdir(emotion_path))
+    print(f"  ✔ New total samples: {new_total}")
+
+
+# ======================================================================
 # Print summary statistics
+# ======================================================================
+
 print("\n" + "=" * 70)
 print("DATA SPLIT SUMMARY")
 print("=" * 70)
